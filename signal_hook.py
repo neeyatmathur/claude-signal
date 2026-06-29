@@ -20,6 +20,8 @@ Design notes:
 
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 
@@ -48,6 +50,14 @@ def main() -> None:
     session_id = str(payload.get("session_id") or "unknown")
     cwd = str(payload.get("cwd") or os.getcwd())
     label = os.path.basename(cwd.rstrip("/")) or cwd
+
+    # Terminal identity, so the UI can click-to-jump to this session's tab.
+    # The hook itself has no controlling tty (Claude spawns hooks detached), so
+    # we climb the parent process chain to the terminal-attached process and use
+    # its tty — which is exactly what Terminal's AppleScript exposes per tab.
+    term_program = os.environ.get("TERM_PROGRAM") or ""
+    term_session_id = os.environ.get("TERM_SESSION_ID") or ""
+    tty = _terminal_tty()
 
     # The Notification event fires both for permission prompts AND for the
     # "waiting for your input" idle prompt. Classify by message so an idle
@@ -81,6 +91,12 @@ def main() -> None:
         "event": str(payload.get("hook_event_name") or ""),
         "ts": time.time(),
     }
+    if term_program:
+        record["term_program"] = term_program
+    if term_session_id:
+        record["term_session_id"] = term_session_id
+    if tty:
+        record["tty"] = tty
 
     tmp = target + ".tmp"
     with open(tmp, "w") as fh:
@@ -91,6 +107,42 @@ def main() -> None:
 def _safe_name(session_id: str) -> str:
     """Make a session id safe to use as a filename."""
     return "".join(c if (c.isalnum() or c in "-_") else "_" for c in session_id)[:128]
+
+
+_TTY_RE = re.compile(r"^ttys[0-9]+$")
+
+
+def _ps(field: str, pid: int) -> str:
+    """Read a single ps field for a pid, e.g. 'tty=' or 'ppid='."""
+    out = subprocess.run(
+        ["ps", "-o", field, "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    return out.stdout.strip()
+
+
+def _terminal_tty():
+    """Climb the parent process chain to find the terminal's tty.
+
+    Hooks run without a controlling terminal, so we walk up from our parent
+    (typically the `claude` process, which is attached to the terminal) until
+    we hit a real ttys device. Returns '/dev/ttysNNN' or None — never raises.
+    """
+    try:
+        pid = os.getppid()
+        for _ in range(12):
+            if pid <= 1:
+                break
+            tty = _ps("tty=", pid)
+            if _TTY_RE.match(tty):
+                return "/dev/" + tty
+            ppid = _ps("ppid=", pid)
+            pid = int(ppid) if ppid.isdigit() else 0
+    except Exception:
+        pass
+    return None
 
 
 if __name__ == "__main__":

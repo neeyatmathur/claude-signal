@@ -17,6 +17,8 @@ Requires pyobjc (see requirements.txt); run via start.command / the venv.
 
 import json
 import os
+import re
+import subprocess
 import time
 
 import objc
@@ -51,6 +53,7 @@ from Cocoa import (
 from PyObjCTools import AppHelper
 
 STATE_DIR = os.path.expanduser("~/.claude/signal/sessions")
+CONFIG_PATH = os.path.expanduser("~/.claude/signal/config.json")
 STALE_SECONDS = 6 * 60 * 60  # drop sessions whose state hasn't updated in 6h
 # A "just finished" green (Stop) settles into a steady "ready" (your turn) after
 # this long untouched. Driven here, by file age, so steady-green works even when
@@ -71,6 +74,15 @@ LABEL_PAD = 3
 ROW_GAP = 14         # vertical gap between sessions
 ROW_H = HOUSE_H + LABEL_PAD + LABEL_H + ROW_GAP
 WIDTH = 112
+
+# Horizontal orientation: the casing is rotated so the 3 lamps sit in a row,
+# making each session much shorter. Lamps stay in red→amber→green order (now
+# left→right). Sessions still stack vertically, label centered below each pill.
+HOUSE_W_H = 3 * LAMP_D + 2 * LAMP_GAP + 2 * HOUSE_PAD   # wide pill
+HOUSE_H_H = LAMP_D + 2 * HOUSE_PAD                       # short pill
+ROW_H_H = HOUSE_H_H + LABEL_PAD + LABEL_H + ROW_GAP
+WIDTH_H = 132        # a touch wider to give folder labels room
+
 COLLAPSED_H = HEADER_H + 2 * PAD
 SCREEN_MARGIN = 12
 BTN_D = 12           # app close / minimize button diameter
@@ -132,6 +144,30 @@ def load_sessions():
     return out
 
 
+def load_config():
+    """Read the persisted UI config (orientation, etc). Never raises."""
+    try:
+        with open(CONFIG_PATH) as fh:
+            cfg = json.load(fh)
+        if isinstance(cfg, dict):
+            return cfg
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def save_config(cfg):
+    """Atomically persist the UI config. Errors are swallowed."""
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(cfg, fh)
+        os.replace(tmp, CONFIG_PATH)
+    except OSError:
+        pass
+
+
 class SignalView(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(SignalView, self).initWithFrame_(frame)
@@ -141,6 +177,7 @@ class SignalView(NSView):
         self.blink_on = True
         self.hover = False
         self.collapsed = False
+        self.orientation = "vertical"   # controller overrides from config
         self.controller = None
         return self
 
@@ -174,13 +211,17 @@ class SignalView(NSView):
 
     def mouseDown_(self, event):
         loc = self.convertPoint_fromView_(event.locationInWindow(), None)
-        close_rect, mini_rect = self._button_rects()
+        close_rect, mini_rect, orient_rect = self._button_rects()
         if NSPointInRect(loc, close_rect):
             NSApplication.sharedApplication().terminate_(None)
             return
         if NSPointInRect(loc, mini_rect):
             if self.controller is not None:
                 self.controller.toggle_collapsed()
+            return
+        if NSPointInRect(loc, orient_rect):
+            if self.controller is not None:
+                self.controller.toggle_orientation()
             return
         # Per-session dismiss: remove just that session's light.
         for brect, fpath in self._row_close_rects():
@@ -191,6 +232,11 @@ class SignalView(NSView):
                     pass
                 if self.controller is not None:
                     self.controller.onPoll_(None)  # refresh immediately
+                return
+        # Click on a session's light -> jump to that terminal session.
+        for srect, rec in self._session_rects():
+            if NSPointInRect(loc, srect):
+                self._jump_to_session(rec)
                 return
         if self.collapsed and self.controller is not None:
             self.controller.toggle_collapsed()
@@ -205,13 +251,26 @@ class SignalView(NSView):
         y = h - PAD - BTN_D + 1
         close_rect = NSMakeRect(w - PAD - BTN_D, y, BTN_D, BTN_D)
         mini_rect = NSMakeRect(w - PAD - 2 * BTN_D - 6, y, BTN_D, BTN_D)
-        return close_rect, mini_rect
+        orient_rect = NSMakeRect(w - PAD - 3 * BTN_D - 12, y, BTN_D, BTN_D)
+        return close_rect, mini_rect, orient_rect
 
     @objc.python_method
     def _draw_button(self, rect, kind, d=BTN_D):
         # subtle circular background
         _rgb(1.0, 1.0, 1.0, 0.16).set()
         NSBezierPath.bezierPathWithOvalInRect_(rect).fill()
+        if kind == "orient":
+            # Three dots arranged in the orientation you'll switch TO.
+            target_horizontal = self.orientation == "vertical"
+            cx = rect.origin.x + d / 2.0
+            cy = rect.origin.y + d / 2.0
+            r = 1.3
+            _rgb(1.0, 1.0, 1.0, 0.85).set()
+            for o in (-3.5, 0.0, 3.5):
+                px, py = (cx + o, cy) if target_horizontal else (cx, cy + o)
+                dot = NSMakeRect(px - r, py - r, 2 * r, 2 * r)
+                NSBezierPath.bezierPathWithOvalInRect_(dot).fill()
+            return
         line = NSBezierPath.bezierPath()
         line.setLineWidth_(1.4)
         inset = 3.5
@@ -236,25 +295,86 @@ class SignalView(NSView):
         line.stroke()
 
     @objc.python_method
+    def _row_h(self):
+        return ROW_H_H if self.orientation == "horizontal" else ROW_H
+
+    @objc.python_method
+    def _casing_rect(self, i):
+        """Bounding rect of row i's traffic-light casing, for this orientation."""
+        b = self.bounds()
+        content_top = b.size.height - PAD - HEADER_H
+        house_top = content_top - i * self._row_h()
+        if self.orientation == "horizontal":
+            house_x = (b.size.width - HOUSE_W_H) / 2.0
+            return NSMakeRect(house_x, house_top - HOUSE_H_H, HOUSE_W_H, HOUSE_H_H)
+        house_x = (b.size.width - HOUSE_W) / 2.0
+        return NSMakeRect(house_x, house_top - HOUSE_H, HOUSE_W, HOUSE_H)
+
+    @objc.python_method
     def _row_close_rects(self):
         """(rect, file_path) for each session's per-row dismiss button."""
         rects = []
         if self.collapsed or not self.sessions:
             return rects
         b = self.bounds()
-        content_top = b.size.height - PAD - HEADER_H
         for i, rec in enumerate(self.sessions):
-            house_top = content_top - i * ROW_H
+            casing = self._casing_rect(i)
+            top = casing.origin.y + casing.size.height
             rx = b.size.width - PAD - ROW_BTN_D
-            ry = house_top - ROW_BTN_D
+            ry = top - ROW_BTN_D
             rects.append((NSMakeRect(rx, ry, ROW_BTN_D, ROW_BTN_D), rec.get("_file")))
         return rects
 
     @objc.python_method
-    def _draw_light(self, house_x, house_top, state):
-        house_rect = NSMakeRect(house_x, house_top - HOUSE_H, HOUSE_W, HOUSE_H)
+    def _session_rects(self):
+        """(casing_rect, record) for each live session, for click-to-jump."""
+        if self.collapsed or not self.sessions:
+            return []
+        return [(self._casing_rect(i), rec) for i, rec in enumerate(self.sessions)]
+
+    @objc.python_method
+    def _jump_to_session(self, rec):
+        """Focus the terminal tab running this session (best-effort)."""
+        tty = str(rec.get("tty") or "")
+        term = str(rec.get("term_program") or "")
+        if term == "Apple_Terminal" and re.match(r"^/dev/ttys[0-9]+$", tty):
+            script = (
+                "on run argv\n"
+                " set theTty to item 1 of argv\n"
+                ' tell application "Terminal"\n'
+                "  activate\n"
+                "  repeat with w in windows\n"
+                "   repeat with t in tabs of w\n"
+                "    if tty of t is theTty then\n"
+                "     set selected of t to true\n"
+                "     set index of w to 1\n"
+                "     return\n"
+                "    end if\n"
+                "   end repeat\n"
+                "  end repeat\n"
+                " end tell\n"
+                "end run"
+            )
+            self._spawn(["osascript", "-e", script, tty])
+            return
+        # Fallback (no tty / non-Terminal host): reveal the project folder.
+        cwd = str(rec.get("cwd") or "")
+        if cwd:
+            self._spawn(["open", cwd])
+
+    @objc.python_method
+    def _spawn(self, argv):
+        try:
+            subprocess.Popen(
+                argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except OSError:
+            pass
+
+    @objc.python_method
+    def _draw_light(self, rect, state):
         casing = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            house_rect, 6.0, 6.0
+            rect, 6.0, 6.0
         )
         HOUSING.set()
         casing.fill()
@@ -262,25 +382,34 @@ class SignalView(NSView):
         casing.setLineWidth_(1.0)
         casing.stroke()
 
+        horizontal = self.orientation == "horizontal"
         active_lamp = STATE_LAMP.get(state)
-        lamp_x = house_x + HOUSE_PAD
-        for j, lamp in enumerate(ORDER):  # red, amber, green (top→bottom)
-            cy = house_top - HOUSE_PAD - LAMP_D / 2.0 - j * (LAMP_D + LAMP_GAP)
-            is_active = lamp == active_lamp
-            if is_active:
+        for j, lamp in enumerate(ORDER):  # red, amber, green (top→bottom / L→R)
+            if horizontal:
+                cx = rect.origin.x + HOUSE_PAD + LAMP_D / 2.0 + j * (LAMP_D + LAMP_GAP)
+                cy = rect.origin.y + rect.size.height / 2.0
+            else:
+                cx = rect.origin.x + HOUSE_PAD + LAMP_D / 2.0
+                cy = (
+                    rect.origin.y + rect.size.height
+                    - HOUSE_PAD - LAMP_D / 2.0 - j * (LAMP_D + LAMP_GAP)
+                )
+            if lamp == active_lamp:
                 lit = True if state in STEADY_STATES else self.blink_on
             else:
                 lit = False
             if lit:
                 glow_d = LAMP_D + 8
-                glow_rect = NSMakeRect(lamp_x - 4, cy - glow_d / 2.0, glow_d, glow_d)
+                glow_rect = NSMakeRect(
+                    cx - glow_d / 2.0, cy - glow_d / 2.0, glow_d, glow_d
+                )
                 color = LAMP_COLOR[lamp]
                 color.colorWithAlphaComponent_(0.30).set()
                 NSBezierPath.bezierPathWithOvalInRect_(glow_rect).fill()
                 color.set()
             else:
                 DIM.set()
-            circle = NSMakeRect(lamp_x, cy - LAMP_D / 2.0, LAMP_D, LAMP_D)
+            circle = NSMakeRect(cx - LAMP_D / 2.0, cy - LAMP_D / 2.0, LAMP_D, LAMP_D)
             NSBezierPath.bezierPathWithOvalInRect_(circle).fill()
 
     @objc.python_method
@@ -310,9 +439,10 @@ class SignalView(NSView):
 
         # Hover-revealed window controls in the top-right corner.
         if self.hover:
-            close_rect, mini_rect = self._button_rects()
+            close_rect, mini_rect, orient_rect = self._button_rects()
             self._draw_button(close_rect, "close")
             self._draw_button(mini_rect, "plus" if self.collapsed else "minus")
+            self._draw_button(orient_rect, "orient")
 
         if self.collapsed:
             return
@@ -329,17 +459,15 @@ class SignalView(NSView):
         placeholder = not self.sessions
         rows = self.sessions if self.sessions else [{"state": "idle", "label": "no sessions"}]
 
-        house_x = (w - HOUSE_W) / 2.0
-        content_top = h - PAD - HEADER_H
         for i, rec in enumerate(rows):
             state = rec.get("state", "idle")
-            house_top = content_top - i * ROW_H
-            self._draw_light(house_x, house_top, state)
+            rect = self._casing_rect(i)
+            self._draw_light(rect, state)
 
             label = str(rec.get("label", "?"))
             if len(label) > 16:
                 label = label[:15] + "…"
-            label_cy = house_top - HOUSE_H - LABEL_PAD - 10
+            label_cy = rect.origin.y - LABEL_PAD - 10
             self._draw_centered(
                 label, label_cy, placeholder_attrs if placeholder else label_attrs
             )
@@ -358,9 +486,11 @@ class Controller(NSObject):
         self.visible = False
         self.blink_on = True
         self.collapsed = False
+        orientation = load_config().get("orientation")
+        self.orientation = orientation if orientation in ("vertical", "horizontal") else "vertical"
 
         height = self._height_for(1)
-        rect = NSMakeRect(0, 0, WIDTH, height)
+        rect = NSMakeRect(0, 0, self._width(), height)
         mask = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, mask, NSBackingStoreBuffered, False
@@ -379,6 +509,7 @@ class Controller(NSObject):
 
         view = SignalView.alloc().initWithFrame_(rect)
         view.controller = self
+        view.orientation = self.orientation
         panel.setContentView_(view)
         self.panel = panel
         self.view = view
@@ -393,18 +524,27 @@ class Controller(NSObject):
         return self
 
     @objc.python_method
+    def _width(self):
+        return WIDTH_H if self.orientation == "horizontal" else WIDTH
+
+    @objc.python_method
+    def _row_h(self):
+        return ROW_H_H if self.orientation == "horizontal" else ROW_H
+
+    @objc.python_method
     def _height_for(self, n):
-        return PAD * 2 + HEADER_H + max(n, 1) * ROW_H
+        return PAD * 2 + HEADER_H + max(n, 1) * self._row_h()
 
     @objc.python_method
     def _reposition(self, height):
         screen = NSScreen.mainScreen()
         if screen is None:
             return
+        width = self._width()
         vf = screen.visibleFrame()
-        x = vf.origin.x + vf.size.width - WIDTH - SCREEN_MARGIN
+        x = vf.origin.x + vf.size.width - width - SCREEN_MARGIN
         y = vf.origin.y + vf.size.height - height - SCREEN_MARGIN
-        self.panel.setFrame_display_(NSMakeRect(x, y, WIDTH, height), True)
+        self.panel.setFrame_display_(NSMakeRect(x, y, width, height), True)
 
     @objc.python_method
     def _desired_height(self):
@@ -424,6 +564,17 @@ class Controller(NSObject):
     def toggle_collapsed(self):
         self.collapsed = not self.collapsed
         self.view.collapsed = self.collapsed
+        self.relayout()
+        self.view.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def toggle_orientation(self):
+        self.orientation = "horizontal" if self.orientation == "vertical" else "vertical"
+        self.view.orientation = self.orientation
+        cfg = load_config()
+        cfg["orientation"] = self.orientation
+        save_config(cfg)
+        self.cur_height = -1  # width changes too, so force a reposition
         self.relayout()
         self.view.setNeedsDisplay_(True)
 

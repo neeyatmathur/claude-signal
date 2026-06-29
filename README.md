@@ -73,9 +73,24 @@ Optional alias (add to `~/.zshrc`):
 alias claude-signal='~/signal/.venv/bin/python ~/signal/signal_app.py >/dev/null 2>&1 &'
 ```
 
-The window is draggable (click-and-drag anywhere on it) if you want to nudge it.
-Hover to reveal the app **✕**/**–** controls and a per-row **✕** to dismiss a
-single session's light.
+The window is draggable (click-and-drag the background) if you want to nudge it.
+Hover to reveal, top-right, the app **✕** (quit), **–** (minimize), and a
+**⋮⋮ orientation** toggle, plus a per-row **✕** to dismiss a single session's light.
+
+### Orientation
+
+By default each session is a **vertical** traffic light (lamps stacked). Click
+the orientation toggle to switch to a **horizontal** layout — the three lamps sit
+in a row, so each session is shorter and more fit in less space. The choice is
+saved to `~/.claude/signal/config.json` and restored on the next launch.
+
+### Click to jump to a session
+
+Click a session's light to jump straight to the terminal it's running in. This
+works for **Apple Terminal** (the indicator records each session's tty and uses
+AppleScript to select that exact tab and raise its window). For other hosts —
+iTerm2, VS Code, the Claude Code desktop app — it falls back to opening the
+session's project folder in Finder.
 
 ## Test without a real session
 
