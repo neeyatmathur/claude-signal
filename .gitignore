@@ -1,0 +1,9 @@
+# Python virtual environment (recreated by install.sh)
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
