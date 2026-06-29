@@ -9,6 +9,12 @@ before you notice. **signal** fixes this by surfacing each session's live state
 as a color outside the terminal, always in view, so you only switch to the
 session that actually needs you.
 
+**You don't have to keep Claude Code on screen.** Kick off a task, then go work
+on something else entirely — a different window, a different app. A quick glance
+at the corner tells you whether Claude is still processing (amber), waiting on
+your input or permission (red), or done (green). No more babysitting the
+terminal: you only come back when a light says it's time.
+
 A small always-on-top indicator pinned to the top-right of your Mac screen that
 shows, **per Claude Code session**, what each one is doing right now:
 
