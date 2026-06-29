@@ -1,19 +1,12 @@
 # signal — a traffic light for Claude Code
 
-**The problem:** Claude Code runs in the background while you work elsewhere — in
-another terminal tab, a different app, or across several sessions at once. You
-can't tell at a glance which session is still busy, which is silently blocked
-waiting for permission, and which has finished and needs your reply. So you keep
-switching tabs to check, or a session sits stalled on a prompt for minutes
-before you notice. **signal** fixes this by surfacing each session's live state
-as a color outside the terminal, always in view, so you only switch to the
-session that actually needs you.
+**The problem:** when Claude Code is working, you have to keep watching the
+terminal to know if it's still busy, stuck waiting for permission, or done. That
+gets worse with several sessions at once.
 
-**You don't have to keep Claude Code on screen.** Kick off a task, then go work
-on something else entirely — a different window, a different app. A quick glance
-at the corner tells you whether Claude is still processing (amber), waiting on
-your input or permission (red), or done (green). No more babysitting the
-terminal: you only come back when a light says it's time.
+**signal** shows each session's state as a color in the corner of your screen,
+so you can work on something else and just glance over: amber = working, red =
+needs you, green = done. You only switch back when a light says it's time.
 
 A small always-on-top indicator pinned to the top-right of your Mac screen that
 shows, **per Claude Code session**, what each one is doing right now:
