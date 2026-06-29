@@ -59,6 +59,15 @@ Hooks take effect for **new** Claude Code sessions started afterward.
 
 ## Run
 
+Once installed, the indicator **starts itself**: the `SessionStart` hook
+launches the floating panel automatically the first time you start any Claude
+Code session, so there's nothing to run by hand. The launch is detached and
+guarded — it never spawns a second copy and never blocks the session.
+
+To opt out of auto-start, set `SIGNAL_NO_AUTOLAUNCH=1` in your environment.
+
+You can also start it manually any time:
+
 ```bash
 open start.command        # or double-click start.command in Finder
 ```
@@ -66,6 +75,7 @@ open start.command        # or double-click start.command in Finder
 The app launches **detached**, so you can safely close the terminal/window it
 opened — the indicator keeps running. To quit it, use the hover **✕** button on
 the panel, double-click **`stop.command`**, or run `pkill -f signal_app.py`.
+(If you quit it mid-session, it reappears on the next session start.)
 
 Optional alias (add to `~/.zshrc`):
 

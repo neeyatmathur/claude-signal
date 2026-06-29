@@ -72,6 +72,12 @@ def main() -> None:
         # permission -> red; idle/waiting-for-input -> steady green ("ready")
         state = "red" if needs_permission else "ready"
 
+    # On session start, make sure the floating panel is running so the
+    # indicator appears automatically with any Claude session — no manual
+    # `start.command`. Idempotent and detached; never blocks the session.
+    if event == "SessionStart" or state == "idle":
+        _maybe_launch_app()
+
     os.makedirs(STATE_DIR, exist_ok=True)
     target = os.path.join(STATE_DIR, _safe_name(session_id) + ".json")
 
@@ -107,6 +113,47 @@ def main() -> None:
 def _safe_name(session_id: str) -> str:
     """Make a session id safe to use as a filename."""
     return "".join(c if (c.isalnum() or c in "-_") else "_" for c in session_id)[:128]
+
+
+def _maybe_launch_app() -> None:
+    """Launch the floating panel if it isn't already running.
+
+    Called on SessionStart so the indicator auto-appears with any Claude
+    session. Idempotent (pgrep guard) and fully detached (new session, no
+    controlling tty) so it survives this hook process exiting. Never raises.
+
+    Opt out by setting SIGNAL_NO_AUTOLAUNCH=1 in the environment.
+    """
+    if os.environ.get("SIGNAL_NO_AUTOLAUNCH"):
+        return
+    try:
+        repo = os.path.dirname(os.path.abspath(__file__))
+        app = os.path.join(repo, "signal_app.py")
+        python = os.path.join(repo, ".venv", "bin", "python")
+        if not (os.path.exists(app) and os.path.exists(python)):
+            return
+
+        # Already running? Don't spawn a second copy.
+        found = subprocess.run(
+            ["pgrep", "-f", "signal_app.py"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if found.returncode == 0 and found.stdout.strip():
+            return
+
+        log = open("/tmp/claude-signal.log", "ab")
+        subprocess.Popen(
+            [python, app],
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            cwd=repo,
+            start_new_session=True,  # detach: survives hook exit, no SIGHUP
+        )
+    except Exception:
+        pass
 
 
 _TTY_RE = re.compile(r"^ttys[0-9]+$")
