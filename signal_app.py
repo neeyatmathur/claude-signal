@@ -589,6 +589,7 @@ class Controller(NSObject):
         self.view = None
         self.cur_height = -1
         self.visible = False
+        self.positioned = False  # becomes True after first top-right placement
         self.blink_on = True
         self.collapsed = False
         orientation = load_config().get("orientation")
@@ -647,8 +648,22 @@ class Controller(NSObject):
             return
         width = self._width()
         vf = screen.visibleFrame()
-        x = vf.origin.x + vf.size.width - width - SCREEN_MARGIN
-        y = vf.origin.y + vf.size.height - height - SCREEN_MARGIN
+        if self.positioned:
+            # Honor wherever the user dragged it: keep the current top-left
+            # corner fixed so the panel grows/shrinks downward in place,
+            # instead of snapping back to the top-right corner on every
+            # session add/remove. Clamp so it can't end up off-screen.
+            frame = self.panel.frame()
+            top = frame.origin.y + frame.size.height
+            x = frame.origin.x
+            y = top - height
+            x = max(vf.origin.x, min(x, vf.origin.x + vf.size.width - width))
+            y = max(vf.origin.y, min(y, vf.origin.y + vf.size.height - height))
+        else:
+            # First placement: pin to the screen's top-right corner.
+            x = vf.origin.x + vf.size.width - width - SCREEN_MARGIN
+            y = vf.origin.y + vf.size.height - height - SCREEN_MARGIN
+            self.positioned = True
         self.panel.setFrame_display_(NSMakeRect(x, y, width, height), True)
 
     @objc.python_method
