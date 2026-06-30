@@ -119,6 +119,12 @@ def load_sessions():
     """Read all live session state files, newest-relevant first."""
     out = []
     now = time.time()
+    # User-assigned names override the folder label (see _rename_session). The
+    # hook rewrites `label` = folder on every event, so the custom name has to
+    # live in config and be re-applied here, or it would get clobbered.
+    custom_names = load_config().get("names")
+    if not isinstance(custom_names, dict):
+        custom_names = {}
     try:
         names = os.listdir(STATE_DIR)
     except OSError:
@@ -139,6 +145,10 @@ def load_sessions():
         if rec.get("state") == "green" and age > GREEN_SETTLE_SECONDS:
             rec["state"] = "ready"
         rec["_file"] = path  # so a per-row close button can remove it
+        rec["folder"] = rec.get("label")  # keep the original folder name
+        sid = str(rec.get("session_id") or "")
+        if custom_names.get(sid):
+            rec["label"] = custom_names[sid]
         out.append(rec)
     out.sort(key=lambda r: (URGENCY.get(r.get("state"), 4), r.get("label", "")))
     return out
@@ -233,6 +243,11 @@ class SignalView(NSView):
                 if self.controller is not None:
                     self.controller.onPoll_(None)  # refresh immediately
                 return
+        # Per-session rename: pencil opens a dialog to relabel this light.
+        for brect, rrec in self._row_edit_rects():
+            if NSPointInRect(loc, brect):
+                self._rename_session(rrec)
+                return
         # Click on a session's light -> jump to that terminal session.
         for srect, rec in self._session_rects():
             if NSPointInRect(loc, srect):
@@ -259,6 +274,17 @@ class SignalView(NSView):
         # subtle circular background
         _rgb(1.0, 1.0, 1.0, 0.16).set()
         NSBezierPath.bezierPathWithOvalInRect_(rect).fill()
+        if kind == "pencil":
+            attrs = {
+                NSFontAttributeName: NSFont.systemFontOfSize_(d - 2),
+                NSForegroundColorAttributeName: _rgb(1.0, 1.0, 1.0, 0.85),
+            }
+            glyph = NSString.stringWithString_("✎")
+            sz = glyph.sizeWithAttributes_(attrs)
+            px = rect.origin.x + (d - sz.width) / 2.0
+            py = rect.origin.y + (d - sz.height) / 2.0
+            glyph.drawAtPoint_withAttributes_(NSMakePoint(px, py), attrs)
+            return
         if kind == "orient":
             # Three dots arranged in the orientation you'll switch TO.
             target_horizontal = self.orientation == "vertical"
@@ -324,6 +350,84 @@ class SignalView(NSView):
             ry = top - ROW_BTN_D
             rects.append((NSMakeRect(rx, ry, ROW_BTN_D, ROW_BTN_D), rec.get("_file")))
         return rects
+
+    @objc.python_method
+    def _label_display(self, rec):
+        """The label string as drawn (truncated), so hit-tests match the text."""
+        label = str(rec.get("label", "?"))
+        if len(label) > 16:
+            label = label[:15] + "…"
+        return label
+
+    @objc.python_method
+    def _row_edit_rects(self):
+        """(rect, record) for each session's per-row rename (pencil) button.
+
+        Sits just past the right end of the (center-aligned) label, vertically
+        centered on it. Clamped to stay inside the panel for long labels.
+        """
+        rects = []
+        if self.collapsed or not self.sessions:
+            return rects
+        attrs = {NSFontAttributeName: NSFont.systemFontOfSize_(11)}
+        w = self.bounds().size.width
+        for i, rec in enumerate(self.sessions):
+            casing = self._casing_rect(i)
+            label = self._label_display(rec)
+            size = NSString.stringWithString_(label).sizeWithAttributes_(attrs)
+            label_right = (w + size.width) / 2.0
+            label_cy = casing.origin.y - LABEL_PAD - 10
+            bx = min(label_right + 3, w - ROW_BTN_D - 3)
+            by = label_cy + (size.height - ROW_BTN_D) / 2.0
+            rects.append((NSMakeRect(bx, by, ROW_BTN_D, ROW_BTN_D), rec))
+        return rects
+
+    @objc.python_method
+    def _rename_session(self, rec):
+        """Prompt for a custom label and persist it, keyed by session id.
+
+        Uses an osascript dialog (same approach as click-to-jump) so we don't
+        have to make this non-activating panel key just to capture text. An
+        empty answer clears the override and reverts to the folder name.
+        """
+        sid = str(rec.get("session_id") or "")
+        if not sid:
+            return
+        cur = str(rec.get("label") or "")
+        esc = cur.replace("\\", "\\\\").replace('"', '\\"')
+        script = (
+            'display dialog "Rename this session" with title "Signal" '
+            'default answer "%s" buttons {"Cancel", "Rename"} '
+            'default button "Rename"' % esc
+        )
+        try:
+            out = subprocess.run(
+                ["osascript", "-e", script], capture_output=True, text=True
+            )
+        except OSError:
+            return
+        if out.returncode != 0:
+            return  # cancelled
+        marker = "text returned:"
+        idx = out.stdout.find(marker)
+        new = out.stdout[idx + len(marker):].strip() if idx >= 0 else ""
+
+        cfg = load_config()
+        names = cfg.get("names")
+        if not isinstance(names, dict):
+            names = {}
+        if new:
+            names[sid] = new
+        else:
+            names.pop(sid, None)  # empty -> back to folder name
+        # Prune names for sessions that no longer exist, so config stays small.
+        live = {str(r.get("session_id") or "") for r in load_sessions()}
+        live.add(sid)
+        names = {k: v for k, v in names.items() if k in live}
+        cfg["names"] = names
+        save_config(cfg)
+        if self.controller is not None:
+            self.controller.onPoll_(None)  # refresh immediately
 
     @objc.python_method
     def _session_rects(self):
@@ -464,18 +568,19 @@ class SignalView(NSView):
             rect = self._casing_rect(i)
             self._draw_light(rect, state)
 
-            label = str(rec.get("label", "?"))
-            if len(label) > 16:
-                label = label[:15] + "…"
+            label = self._label_display(rec)
             label_cy = rect.origin.y - LABEL_PAD - 10
             self._draw_centered(
                 label, label_cy, placeholder_attrs if placeholder else label_attrs
             )
 
-        # Per-session dismiss buttons (only over real sessions, on hover).
+        # Per-session dismiss (✕) and rename (✎) buttons, on hover over real
+        # sessions — placed on opposite top corners of each casing.
         if self.hover and not placeholder:
             for brect, _f in self._row_close_rects():
                 self._draw_button(brect, "close", ROW_BTN_D)
+            for brect, _r in self._row_edit_rects():
+                self._draw_button(brect, "pencil", ROW_BTN_D)
 
 
 class Controller(NSObject):

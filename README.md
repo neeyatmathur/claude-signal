@@ -85,7 +85,16 @@ alias claude-signal='~/signal/.venv/bin/python ~/signal/signal_app.py >/dev/null
 
 The window is draggable (click-and-drag the background) if you want to nudge it.
 Hover to reveal, top-right, the app **✕** (quit), **–** (minimize), and a
-**⋮⋮ orientation** toggle, plus a per-row **✕** to dismiss a single session's light.
+**⋮⋮ orientation** toggle. Each session row reveals, on hover, a per-row **✕**
+(top-right) to dismiss that light and a **✎** pencil (next to the name) to rename it.
+
+### Rename a session
+
+Each session is labeled by its project folder by default. Hover a row and click
+the **✎** pencil to give it a custom name (e.g. "Payments API" instead of
+`api-gw`) — handy when several sessions share a folder name or the folder name
+isn't descriptive. The name is keyed to that session and saved in
+`~/.claude/signal/config.json`; clearing the dialog reverts to the folder name.
 
 ### Orientation
 
